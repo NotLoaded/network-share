@@ -413,6 +413,19 @@ function Get-MimeType($extension) {
     }
 }
 
+function Get-BrowserName($userAgent) {
+    if ([string]::IsNullOrEmpty($userAgent)) { return "Unknown" }
+    if ($userAgent -match "Edg/") { return "Edge" }
+    if ($userAgent -match "OPR/|Opera") { return "Opera" }
+    if ($userAgent -match "Chrome/") { return "Chrome" }
+    if ($userAgent -match "Firefox/") { return "Firefox" }
+    if ($userAgent -match "iPhone|iPad") { return "Safari (iOS)" }
+    if ($userAgent -match "Safari/" -and $userAgent -notmatch "Chrome/") { return "Safari" }
+    if ($userAgent -match "Trident/.*rv:11") { return "IE11" }
+    if ($userAgent -match "Mobile") { return "Mobile" }
+    return "Other"
+}
+
 function Send-Response($stream, $statusCode, $statusText, $contentType, $bodyBytes) {
     $headerString = "HTTP/1.1 $statusCode $statusText`r`n"
     $headerString += "Access-Control-Allow-Origin: *`r`n"
@@ -426,6 +439,29 @@ function Send-Response($stream, $statusCode, $statusText, $contentType, $bodyByt
     }
 }
 
+$global:logs = @()
+$global:inputBuffer = ""
+$global:tabPrefix = $null
+$global:tabMatches = @()
+$global:tabIndex = 0
+
+function Write-Prompt {
+    try {
+        [Console]::Write("`r" + (" " * 80) + "`r")
+        [Console]::Write("Server> $global:inputBuffer")
+    } catch {}
+}
+
+function Add-Log($msg, $color) {
+    try { [Console]::Write("`r" + (" " * 80) + "`r") } catch {}
+    Write-Host $msg -ForegroundColor $color
+    $global:logs += $msg
+    Write-Prompt
+}
+
+# Initial prompt
+Write-Prompt
+
 # The Main Server Loop using raw TCP to bypass HTTP.sys limitations
 while ($true) {
     if ($listener.Pending()) {
@@ -433,6 +469,18 @@ while ($true) {
         try {
             $client = $listener.AcceptTcpClient()
             $stream = $client.GetStream()
+            try { $clientIP = $client.Client.RemoteEndPoint.Address.ToString() } catch { $clientIP = "Unknown" }
+            
+            $waitCount = 0
+            while (-not $stream.DataAvailable -and $waitCount -lt 10) {
+                Start-Sleep -Milliseconds 50
+                $waitCount++
+            }
+            
+            if (-not $stream.DataAvailable) {
+                $client.Close()
+                continue
+            }
             
             $buffer = New-Object byte[] 65536
             $read = $stream.Read($buffer, 0, $buffer.Length)
@@ -458,6 +506,8 @@ while ($true) {
                     $headers[$matches[1]] = $matches[2]
                 }
             }
+            
+            $browser = Get-BrowserName $headers["User-Agent"]
             
             if ($method -eq "GET") {
                 if ($urlPath -eq "/") {
@@ -527,7 +577,7 @@ while ($true) {
                             $stream.Write($outBuffer, 0, $readOut)
                         }
                         $fileStream.Close()
-                        Write-Host "[DOWNLOAD] Sent: $fileName" -ForegroundColor Cyan
+                        Add-Log "[$(Get-Date -f 'HH:mm:ss')] [DOWNLOAD] $fileName by $clientIP ($browser)" "Cyan"
                     } else {
                         Send-Response -stream $stream -statusCode "404" -statusText "Not Found" -contentType "text/plain" -bodyBytes ([System.Text.Encoding]::UTF8.GetBytes("File Not Found"))
                     }
@@ -546,7 +596,7 @@ while ($true) {
                     if (Test-Path $filePath) {
                         Remove-Item -Path $filePath -Force -ErrorAction SilentlyContinue
                         Send-Response -stream $stream -statusCode "200" -statusText "OK" -contentType "text/plain" -bodyBytes ([System.Text.Encoding]::UTF8.GetBytes("OK"))
-                        Write-Host "[DELETE] Removed: $fileName" -ForegroundColor DarkRed
+                        Add-Log "[$(Get-Date -f 'HH:mm:ss')] [DELETE] $fileName by $clientIP ($browser)" "DarkRed"
                     } else {
                         Send-Response -stream $stream -statusCode "404" -statusText "Not Found" -contentType "text/plain" -bodyBytes ([System.Text.Encoding]::UTF8.GetBytes("Not Found"))
                     }
@@ -582,7 +632,7 @@ while ($true) {
                     $fileStream.Close()
                     
                     Send-Response -stream $stream -statusCode "200" -statusText "OK" -contentType "text/plain" -bodyBytes ([System.Text.Encoding]::UTF8.GetBytes("OK"))
-                    Write-Host "[UPLOAD] Received: $fileName" -ForegroundColor Green
+                    Add-Log "[$(Get-Date -f 'HH:mm:ss')] [UPLOAD] $fileName from $clientIP ($browser)" "Green"
                 }
             } else {
                 Send-Response -stream $stream -statusCode "405" -statusText "Method Not Allowed" -contentType "text/plain" -bodyBytes ([System.Text.Encoding]::UTF8.GetBytes("Method Not Allowed"))
@@ -593,7 +643,81 @@ while ($true) {
             if ($null -ne $client) { $client.Close() }
         }
     } else {
-        Start-Sleep -Milliseconds 50
+        if ([Console]::KeyAvailable) {
+            $keyInfo = [Console]::ReadKey($true)
+            if ($keyInfo.Key -eq 'Enter') {
+                [Console]::WriteLine()
+                $cmd = $global:inputBuffer.Trim()
+                $global:inputBuffer = ""
+                $global:tabPrefix = $null
+                
+                if ($cmd -eq "help") {
+                    Write-Host "Available Commands:" -ForegroundColor Yellow
+                    Write-Host "  help         - Show this help message"
+                    Write-Host "  ls, list     - List all files on the server"
+                    Write-Host "  del, delete  - Delete a file (e.g. del file.txt). Press TAB for autocomplete."
+                    Write-Host "  logs         - Show runtime history of uploads/downloads"
+                    Write-Host "  end, exit    - Stop the server"
+                } elseif ($cmd -match "^(end|exit)$") {
+                    Write-Host "Stopping server..." -ForegroundColor Yellow
+                    break
+                } elseif ($cmd -match "^(ls|list)$") {
+                    $files = Get-ChildItem -Path $sharedFolder | Where-Object { -not $_.PSIsContainer }
+                    if ($files.Count -eq 0) {
+                        Write-Host "No files." -ForegroundColor Gray
+                    } else {
+                        foreach ($f in $files) { Write-Host "  $($f.Name) ($($f.Length) bytes)" }
+                    }
+                } elseif ($cmd -match "^(del|delete)\s+(.+)$") {
+                    $target = $matches[2]
+                    $delPath = Join-Path $sharedFolder $target
+                    if (Test-Path $delPath) {
+                        Remove-Item $delPath -Force
+                        Add-Log "[$(Get-Date -f 'HH:mm:ss')] [DELETE] $target via CLI" "DarkRed"
+                    } else {
+                        Write-Host "File not found: $target" -ForegroundColor Red
+                    }
+                } elseif ($cmd -eq "logs") {
+                    if ($global:logs.Count -eq 0) {
+                        Write-Host "No logs yet." -ForegroundColor Gray
+                    } else {
+                        foreach ($log in $global:logs) { Write-Host $log }
+                    }
+                } elseif ($cmd -ne "") {
+                    Write-Host "Unknown command. Type 'help'." -ForegroundColor Red
+                }
+                Write-Prompt
+            } elseif ($keyInfo.Key -eq 'Backspace') {
+                if ($global:inputBuffer.Length -gt 0) {
+                    $global:inputBuffer = $global:inputBuffer.Substring(0, $global:inputBuffer.Length - 1)
+                    $global:tabPrefix = $null
+                    Write-Prompt
+                }
+            } elseif ($keyInfo.Key -eq 'Tab') {
+                $parts = $global:inputBuffer -split '\s+', 2
+                if ($parts.Count -eq 2 -and ($parts[0] -match "^(del|delete)$")) {
+                    $prefix = $parts[1]
+                    if ($null -eq $global:tabPrefix -or !$global:inputBuffer.StartsWith("$($parts[0]) $($global:tabCurrent)")) {
+                        $global:tabPrefix = $prefix
+                        $global:tabMatches = @(Get-ChildItem -Path $sharedFolder | Where-Object { $_.Name.StartsWith($global:tabPrefix, [StringComparison]::InvariantCultureIgnoreCase) } | Select-Object -ExpandProperty Name)
+                        $global:tabIndex = 0
+                    } else {
+                        $global:tabIndex = ($global:tabIndex + 1) % $global:tabMatches.Count
+                    }
+                    if ($global:tabMatches.Count -gt 0) {
+                        $global:tabCurrent = $global:tabMatches[$global:tabIndex]
+                        $global:inputBuffer = "$($parts[0]) $($global:tabCurrent)"
+                        Write-Prompt
+                    }
+                }
+            } elseif ($keyInfo.KeyChar -ne "`0" -and $keyInfo.Key -ne 'Escape') {
+                $global:inputBuffer += $keyInfo.KeyChar
+                $global:tabPrefix = $null
+                try { [Console]::Write($keyInfo.KeyChar) } catch {}
+            }
+        } else {
+            Start-Sleep -Milliseconds 50
+        }
     }
 }
 } finally {
