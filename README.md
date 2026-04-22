@@ -50,3 +50,6 @@ Instead of a static console, the server features a non-blocking interactive comm
 
 ## 🎨 UI/UX Design
 The frontend is embedded as a "here-string" directly within the PowerShell script. It features a modern, dark-themed, glassmorphic UI built purely with vanilla CSS and JavaScript, avoiding any reliance on external CDNs or frameworks like Tailwind or React to maintain offline plug-and-play capability.
+
+# IMPORTANT INFORMATION: AI GENERATED
+This tool/application was fully built using Antigravity AI Assistant aswell as some other AI tools/assistants.
