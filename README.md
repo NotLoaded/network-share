@@ -6,6 +6,7 @@ A lightweight, zero-dependency local network file-sharing server built entirely 
 This system allows you to instantly spin up a local web server from a USB stick or a folder on any modern Windows computer. It creates a simple, beautiful, and mobile-friendly web interface that anyone on your local network (Wi-Fi or LAN) can access to:
 - **Download** files you have placed in the shared folder.
 - **Upload** files from their devices directly onto your computer.
+- **Quick Connect** via a dynamically generated QR code for instant mobile access.
 
 No Node.js, Python, or third-party software is required. It works completely out-of-the-box using the built-in capabilities of Windows.
 
